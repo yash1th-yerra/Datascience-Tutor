@@ -3,16 +3,19 @@ import os
 import tempfile
 import pandas as pd
 import numpy as np
+# import matplotlib.pyplot as plt
 from dotenv import load_dotenv
-import time
-import sys
-
-# Set up basic page
-st.set_page_config(page_title="Data Science Tutor", layout="wide")
-st.title("Data Science Tutor")
-
-# Debug checkpoint
-# st.write("App initialization started")
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from langchain_community.document_loaders import PyPDFLoader, CSVLoader, TextLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.chains import ConversationalRetrievalChain
 
 # Load environment variables - works for local development
 load_dotenv()
@@ -21,14 +24,17 @@ load_dotenv()
 # Use a try-except to handle both local and cloud environments
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    # st.write("API key loaded from secrets")
-except Exception as e:
+except:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if GEMINI_API_KEY:
-        st.write("API key loaded from environment variables")
-    else:
-        st.error("GEMINI_API_KEY is not set. Please set it in your .env file or Streamlit secrets.")
-        st.stop()
+
+# Ensure API key is available
+if not GEMINI_API_KEY:
+    st.error("GEMINI_API_KEY is not set. Please set it in your .env file or Streamlit secrets.")
+    st.stop()
+
+# Streamlit configuration
+st.set_page_config(page_title="Data Science Tutor", layout="wide")
+st.title("Data Science Tutor")
 
 # Initialize session state variables
 if 'uploaded_files' not in st.session_state:
@@ -43,10 +49,6 @@ if 'needs_rerun' not in st.session_state:
     st.session_state.needs_rerun = False
 if 'chat_history_messages' not in st.session_state:
     st.session_state.chat_history_messages = []
-if 'llm_initialized' not in st.session_state:
-    st.session_state.llm_initialized = False
-if 'embeddings_initialized' not in st.session_state:
-    st.session_state.embeddings_initialized = False
 
 # Generate a unique session ID for each user
 if 'session_id' not in st.session_state:
@@ -57,176 +59,135 @@ if 'session_id' not in st.session_state:
 DB_PATH = ":memory:"  # Use in-memory SQLite database for Streamlit Cloud
 SESSION_ID = st.session_state.session_id
 
-# Lazy loading function for LLM
-def initialize_llm():
-    if not st.session_state.llm_initialized:
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            
-            # Set a timeout for the API call
-            start_time = time.time()
-            llm = ChatGoogleGenerativeAI(
-                api_key=GEMINI_API_KEY,
-                model="gemini-1.5-flash",
-                streaming=True,
-                timeout=10  # 10 second timeout
-            )
-            st.session_state.llm = llm
-            st.session_state.llm_initialized = True
-            
-            # Create the chat template
-            from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-            from langchain_core.output_parsers import StrOutputParser
-            
-            standard_template = ChatPromptTemplate(
-                messages=[
-                    ("system", "You are a highly knowledgeable Data Science tutor. You must strictly answer only Data Science-related queries. If a user asks about anything unrelated, firmly respond with: 'I can only assist with Data Science topics. Please ask a question related to Data Science. Other topics will not be addressed.provide answers in clear and detailed way'"),
-                    MessagesPlaceholder(variable_name="chat_history"),
-                    ("human", "{question}")
-                ]
-            )
-            
-            # Create the output parser
-            output_parser = StrOutputParser()
-            
-            # Define the conversation chain
-            st.session_state.standard_chain = standard_template | llm | output_parser
-            
-            return True
-        except Exception as e:
-            st.error(f"Failed to initialize LLM: {str(e)}")
-            return False
-    return True
-
-# Lazy loading function for embeddings
-def initialize_embeddings():
-    if not st.session_state.embeddings_initialized:
-        try:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
-            
-            # Set a timeout for the API call
-            embeddings = GoogleGenerativeAIEmbeddings(
-                model="embedding-001",
-                api_key=GEMINI_API_KEY,
-                timeout=10  # 10 second timeout
-            )
-            st.session_state.embeddings = embeddings
-            st.session_state.embeddings_initialized = True
-            return True
-        except Exception as e:
-            st.error(f"Failed to initialize embeddings: {str(e)}")
-            return False
-    return True
-
 # Initialize chat history
-def initialize_chat_history():
-    if 'chat_history' not in st.session_state:
-        try:
-            from langchain_core.messages import HumanMessage, AIMessage
-            from langchain_community.chat_message_histories import SQLChatMessageHistory
-            
-            chat_history = SQLChatMessageHistory(
-                session_id=SESSION_ID,
-                connection=f"sqlite:///{DB_PATH}"
-            )
-            st.session_state.chat_history = chat_history
-            return True
-        except Exception as e:
-            st.error(f"Failed to initialize chat history: {str(e)}")
-            return False
-    return True
+try:
+    chat_history = SQLChatMessageHistory(
+        session_id=SESSION_ID,
+        connection=f"sqlite:///{DB_PATH}"
+    )
+except Exception as e:
+    st.error(f"Failed to initialize chat history: {str(e)}")
+    st.error("Falling back to session-based history")
+    chat_history = None
+
+# Initialize the LLM with error handling
+try:
+    llm = ChatGoogleGenerativeAI(
+        api_key=GEMINI_API_KEY,
+        model="gemini-1.5-flash",  # Updated model name
+        streaming=True
+    )
+except Exception as e:
+    st.error(f"Failed to initialize LLM: {str(e)}")
+    st.write("Please check your GEMINI_API_KEY and model name.")
+    st.stop()
+
+# Create embeddings with error handling
+try:
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="embedding-001",  # Updated model name
+        api_key=GEMINI_API_KEY
+    )
+except Exception as e:
+    st.error(f"Failed to initialize embeddings: {str(e)}")
+    embeddings = None
 
 # Function to process uploaded files
 def process_uploaded_files(uploaded_files):
-    if not initialize_embeddings():
-        st.warning("Embeddings could not be initialized. File search capabilities will be limited.")
-        return []
-        
     documents = []
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     
-    try:
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-        from langchain_community.document_loaders import PyPDFLoader, CSVLoader, TextLoader
-        
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        
-        for file in uploaded_files:
-            file_ext = os.path.splitext(file.name)[1].lower()
+    for file in uploaded_files:
+        file_ext = os.path.splitext(file.name)[1].lower()
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+                temp_file.write(file.getvalue())
+                temp_path = temp_file.name
+            
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-                    temp_file.write(file.getvalue())
-                    temp_path = temp_file.name
-                
+                if file_ext == '.pdf':
+                    loader = PyPDFLoader(temp_path)
+                    documents.extend(loader.load())
+                elif file_ext == '.csv':
+                    loader = CSVLoader(temp_path)
+                    documents.extend(loader.load())
+                elif file_ext in ['.txt', '.py', '.ipynb', '.r', '.sql']:
+                    loader = TextLoader(temp_path)
+                    documents.extend(loader.load())
+                else:
+                    st.warning(f"Unsupported file type: {file_ext}")
+            except Exception as e:
+                st.error(f"Error processing file {file.name}: {str(e)}")
+            finally:
+                # Clean up temp file with error handling
                 try:
-                    if file_ext == '.pdf':
-                        loader = PyPDFLoader(temp_path)
-                        documents.extend(loader.load())
-                    elif file_ext == '.csv':
-                        loader = CSVLoader(temp_path)
-                        documents.extend(loader.load())
-                    elif file_ext in ['.txt', '.py', '.ipynb', '.r', '.sql']:
-                        loader = TextLoader(temp_path)
-                        documents.extend(loader.load())
-                    else:
-                        st.warning(f"Unsupported file type: {file_ext}")
+                    os.unlink(temp_path)
                 except Exception as e:
-                    st.error(f"Error processing file {file.name}: {str(e)}")
-                finally:
-                    # Clean up temp file with error handling
-                    try:
-                        os.unlink(temp_path)
-                    except Exception as e:
-                        st.warning(f"Could not delete temporary file: {str(e)}")
-            except Exception as e:
-                st.error(f"Error creating temporary file for {file.name}: {str(e)}")
-        
-        if documents and st.session_state.embeddings_initialized:
-            # Add a try-except block to catch embedding errors
-            try:
-                split_docs = text_splitter.split_documents(documents)
-                
-                from langchain_community.vectorstores import FAISS
-                vectorstore = FAISS.from_documents(split_docs, st.session_state.embeddings)
-                st.session_state.vectorstore = vectorstore
-                st.session_state.documents = documents
-                st.success(f"Successfully processed {len(uploaded_files)} files with {len(split_docs)} text chunks.")
-            except Exception as e:
-                st.error(f"Error during document processing: {str(e)}")
-                # Continue without vector search if embedding fails
-                st.session_state.documents = documents
-                st.warning("File content is available but advanced search capabilities are limited.")
-        return documents
-    except Exception as e:
-        st.error(f"Error in file processing: {str(e)}")
-        return []
+                    st.warning(f"Could not delete temporary file: {str(e)}")
+        except Exception as e:
+            st.error(f"Error creating temporary file for {file.name}: {str(e)}")
+    
+    if documents and embeddings:
+        # Add a try-except block to catch embedding errors
+        try:
+            split_docs = text_splitter.split_documents(documents)
+            vectorstore = FAISS.from_documents(split_docs, embeddings)
+            st.session_state.vectorstore = vectorstore
+            st.session_state.documents = documents
+            st.success(f"Successfully processed {len(uploaded_files)} files with {len(split_docs)} text chunks.")
+        except Exception as e:
+            st.error(f"Error during document processing: {str(e)}")
+            # Continue without vector search if embedding fails
+            st.session_state.documents = documents
+            st.warning("File content is available but advanced search capabilities are limited.")
+    return documents
+
+# Create the chat template
+standard_template = ChatPromptTemplate(
+    messages=[
+        ("system", "You are a highly knowledgeable Data Science tutor. You must strictly answer only Data Science-related queries. If a user asks about anything unrelated, firmly respond with: 'I can only assist with Data Science topics. Please ask a question related to Data Science. Other topics will not be addressed.provide answers in clear and detailed way'"),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}")
+    ]
+)
+
+# Create the output parser
+output_parser = StrOutputParser()
+
+# Define the conversation chain
+standard_chain = standard_template | llm | output_parser
+
+# Wrap the chain with message history
+# Use a fallback mechanism if SQLChatMessageHistory fails
+if chat_history:
+    conversation_chain = RunnableWithMessageHistory(
+        standard_chain,
+        lambda session_id: chat_history,
+        input_messages_key="question",
+        history_messages_key="chat_history"
+    )
+else:
+    # Create a simple chain without persistent history
+    conversation_chain = standard_chain
 
 def generate_response(user_input):
     # Add to session state history (backup)
     st.session_state.chat_history_messages.append({"role": "user", "content": user_input})
     
-    # Initialize LLM if not already done
-    if not initialize_llm():
-        return "I apologize, but I couldn't initialize the AI model. Please check your API key and try again."
-    
-    # Initialize chat history if not already done
-    initialize_chat_history()
-    
-    if st.session_state.vectorstore and st.session_state.embeddings_initialized:
+    if st.session_state.vectorstore and embeddings:
         try:
-            from langchain.chains import ConversationalRetrievalChain
-            
             # Create a retrieval chain that uses the vectorstore
             retrieval_chain = ConversationalRetrievalChain.from_llm(
-                llm=st.session_state.llm,
+                llm=llm,
                 retriever=st.session_state.vectorstore.as_retriever(),
                 return_source_documents=True
             )
             
             # Prepare conversation history for the chain
-            if 'chat_history' in st.session_state and hasattr(st.session_state.chat_history, 'messages'):
-                history = [(msg.content, st.session_state.chat_history.messages[i+1].content) 
-                          for i, msg in enumerate(st.session_state.chat_history.messages[:-1:2]) 
-                          if i+1 < len(st.session_state.chat_history.messages)]
+            if chat_history and chat_history.messages:
+                history = [(msg.content, chat_history.messages[i+1].content) 
+                          for i, msg in enumerate(chat_history.messages[:-1:2]) 
+                          if i+1 < len(chat_history.messages)]
             else:
                 # Use session state as backup
                 history = []
@@ -244,9 +205,9 @@ def generate_response(user_input):
             response = result["answer"]
             
             # Add to both history systems
-            if 'chat_history' in st.session_state:
-                st.session_state.chat_history.add_user_message(user_input)
-                st.session_state.chat_history.add_ai_message(response)
+            if chat_history:
+                chat_history.add_user_message(user_input)
+                chat_history.add_ai_message(response)
             st.session_state.chat_history_messages.append({"role": "assistant", "content": response})
             
             return response
@@ -261,12 +222,17 @@ def generate_response(user_input):
 def generate_standard_response(user_input):
     response = ""
     try:
-        if 'standard_chain' in st.session_state:
-            # Use the standard chain
-            for chunk in st.session_state.standard_chain.stream({"question": user_input}):
+        if chat_history:
+            # Use the conversation chain with history
+            for chunk in conversation_chain.stream(
+                {"question": user_input},
+                config={"configurable": {"session_id": SESSION_ID}}
+            ):
                 response += chunk
         else:
-            response = "I apologize, but the AI model couldn't be initialized. Please check your API key and try again."
+            # Use the standard chain without history
+            for chunk in standard_chain.stream({"question": user_input}):
+                response += chunk
         
         # Add to session state history (backup)
         st.session_state.chat_history_messages.append({"role": "assistant", "content": response})
@@ -347,6 +313,3 @@ if st.session_state.documents:
             if i == 2 and len(st.session_state.documents) > 3:
                 st.write(f"...and {len(st.session_state.documents) - 3} more documents")
                 break
-
-# Debug checkpoint
-st.write("App initialization completed")
