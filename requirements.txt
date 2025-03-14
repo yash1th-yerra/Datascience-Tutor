@@ -11,11 +11,8 @@ faiss-cpu
 sentence-transformers
 # Document processing
 pypdf
-unstructured
-tabulate
+
 # Data processing
-pandas
 numpy
-matplotlib
 # Database
 sqlalchemy
