@@ -12,7 +12,7 @@ st.set_page_config(page_title="Data Science Tutor", layout="wide")
 st.title("Data Science Tutor")
 
 # Debug checkpoint
-st.write("App initialization started")
+# st.write("App initialization started")
 
 # Load environment variables - works for local development
 load_dotenv()
@@ -21,7 +21,7 @@ load_dotenv()
 # Use a try-except to handle both local and cloud environments
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    st.write("API key loaded from secrets")
+    # st.write("API key loaded from secrets")
 except Exception as e:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if GEMINI_API_KEY:
