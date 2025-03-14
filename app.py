@@ -4,9 +4,9 @@ import tempfile
 import asyncio
 from langchain.chains import ConversationalRetrievalChain
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyPDFLoader, Docx2txtLoader
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain.memory import ConversationBufferMemory
 
 # Load API key from environment variable
