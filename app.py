@@ -17,8 +17,20 @@ from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain.chains import ConversationalRetrievalChain
 
-# Load environment variables
+# Load environment variables - works for local development
 load_dotenv()
+
+# For Streamlit Cloud deployment, get API key from secrets
+# Use a try-except to handle both local and cloud environments
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Ensure API key is available
+if not GEMINI_API_KEY:
+    st.error("GEMINI_API_KEY is not set. Please set it in your .env file or Streamlit secrets.")
+    st.stop()
 
 # Streamlit configuration
 st.set_page_config(page_title="Data Science Tutor", layout="wide")
@@ -35,30 +47,50 @@ if 'submitted_input' not in st.session_state:
     st.session_state.submitted_input = ""
 if 'needs_rerun' not in st.session_state:
     st.session_state.needs_rerun = False
+if 'chat_history_messages' not in st.session_state:
+    st.session_state.chat_history_messages = []
 
-# API and database configuration
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DB_PATH = "chat_history.db"
-SESSION_ID = "user_123"
+# Generate a unique session ID for each user
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = f"user_{np.random.randint(10000)}"
+
+# Use a database path that works in Streamlit Cloud
+# For Streamlit Cloud, we'll use in-memory SQLite database
+DB_PATH = ":memory:"  # Use in-memory SQLite database for Streamlit Cloud
+SESSION_ID = st.session_state.session_id
 
 # Initialize chat history
-chat_history = SQLChatMessageHistory(
-    session_id=SESSION_ID,
-    connection=f"sqlite:///{DB_PATH}"
-)
+try:
+    chat_history = SQLChatMessageHistory(
+        session_id=SESSION_ID,
+        connection=f"sqlite:///{DB_PATH}"
+    )
+except Exception as e:
+    st.error(f"Failed to initialize chat history: {str(e)}")
+    st.error("Falling back to session-based history")
+    chat_history = None
 
-# Initialize the LLM
-llm = ChatGoogleGenerativeAI(
-    api_key=GEMINI_API_KEY,
-    model="gemini-2.0-flash-exp",
-    streaming=True
-)
+# Initialize the LLM with error handling
+try:
+    llm = ChatGoogleGenerativeAI(
+        api_key=GEMINI_API_KEY,
+        model="gemini-1.5-flash",  # Updated model name
+        streaming=True
+    )
+except Exception as e:
+    st.error(f"Failed to initialize LLM: {str(e)}")
+    st.write("Please check your GEMINI_API_KEY and model name.")
+    st.stop()
 
-# Create embeddings with the correct model name
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001",  # Fixed model name format
-    api_key=GEMINI_API_KEY
-)
+# Create embeddings with error handling
+try:
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="embedding-001",  # Updated model name
+        api_key=GEMINI_API_KEY
+    )
+except Exception as e:
+    st.error(f"Failed to initialize embeddings: {str(e)}")
+    embeddings = None
 
 # Function to process uploaded files
 def process_uploaded_files(uploaded_files):
@@ -67,28 +99,35 @@ def process_uploaded_files(uploaded_files):
     
     for file in uploaded_files:
         file_ext = os.path.splitext(file.name)[1].lower()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-            temp_file.write(file.getvalue())
-            temp_path = temp_file.name
-        
         try:
-            if file_ext == '.pdf':
-                loader = PyPDFLoader(temp_path)
-                documents.extend(loader.load())
-            elif file_ext == '.csv':
-                loader = CSVLoader(temp_path)
-                documents.extend(loader.load())
-            elif file_ext in ['.txt', '.py', '.ipynb', '.r', '.sql']:
-                loader = TextLoader(temp_path)
-                documents.extend(loader.load())
-            else:
-                st.warning(f"Unsupported file type: {file_ext}")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+                temp_file.write(file.getvalue())
+                temp_path = temp_file.name
+            
+            try:
+                if file_ext == '.pdf':
+                    loader = PyPDFLoader(temp_path)
+                    documents.extend(loader.load())
+                elif file_ext == '.csv':
+                    loader = CSVLoader(temp_path)
+                    documents.extend(loader.load())
+                elif file_ext in ['.txt', '.py', '.ipynb', '.r', '.sql']:
+                    loader = TextLoader(temp_path)
+                    documents.extend(loader.load())
+                else:
+                    st.warning(f"Unsupported file type: {file_ext}")
+            except Exception as e:
+                st.error(f"Error processing file {file.name}: {str(e)}")
+            finally:
+                # Clean up temp file with error handling
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    st.warning(f"Could not delete temporary file: {str(e)}")
         except Exception as e:
-            st.error(f"Error processing file {file.name}: {str(e)}")
-        finally:
-            os.unlink(temp_path)
+            st.error(f"Error creating temporary file for {file.name}: {str(e)}")
     
-    if documents:
+    if documents and embeddings:
         # Add a try-except block to catch embedding errors
         try:
             split_docs = text_splitter.split_documents(documents)
@@ -119,15 +158,23 @@ output_parser = StrOutputParser()
 standard_chain = standard_template | llm | output_parser
 
 # Wrap the chain with message history
-conversation_chain = RunnableWithMessageHistory(
-    standard_chain,
-    lambda session_id: chat_history,
-    input_messages_key="question",
-    history_messages_key="chat_history"
-)
+# Use a fallback mechanism if SQLChatMessageHistory fails
+if chat_history:
+    conversation_chain = RunnableWithMessageHistory(
+        standard_chain,
+        lambda session_id: chat_history,
+        input_messages_key="question",
+        history_messages_key="chat_history"
+    )
+else:
+    # Create a simple chain without persistent history
+    conversation_chain = standard_chain
 
 def generate_response(user_input):
-    if st.session_state.vectorstore:
+    # Add to session state history (backup)
+    st.session_state.chat_history_messages.append({"role": "user", "content": user_input})
+    
+    if st.session_state.vectorstore and embeddings:
         try:
             # Create a retrieval chain that uses the vectorstore
             retrieval_chain = ConversationalRetrievalChain.from_llm(
@@ -135,16 +182,34 @@ def generate_response(user_input):
                 retriever=st.session_state.vectorstore.as_retriever(),
                 return_source_documents=True
             )
+            
+            # Prepare conversation history for the chain
+            if chat_history and chat_history.messages:
+                history = [(msg.content, chat_history.messages[i+1].content) 
+                          for i, msg in enumerate(chat_history.messages[:-1:2]) 
+                          if i+1 < len(chat_history.messages)]
+            else:
+                # Use session state as backup
+                history = []
+                for i in range(0, len(st.session_state.chat_history_messages)-1, 2):
+                    if i+1 < len(st.session_state.chat_history_messages):
+                        history.append((
+                            st.session_state.chat_history_messages[i]["content"],
+                            st.session_state.chat_history_messages[i+1]["content"]
+                        ))
+            
             result = retrieval_chain.invoke({
                 "question": user_input,
-                "chat_history": [(msg.content, chat_history.messages[i+1].content) 
-                                for i, msg in enumerate(chat_history.messages[:-1:2]) if i+1 < len(chat_history.messages)]
+                "chat_history": history
             })
             response = result["answer"]
             
-            # Add messages to chat history
-            chat_history.add_user_message(user_input)
-            chat_history.add_ai_message(response)
+            # Add to both history systems
+            if chat_history:
+                chat_history.add_user_message(user_input)
+                chat_history.add_ai_message(response)
+            st.session_state.chat_history_messages.append({"role": "assistant", "content": response})
+            
             return response
         except Exception as e:
             # Fallback to standard chain if retrieval fails
@@ -156,12 +221,27 @@ def generate_response(user_input):
 
 def generate_standard_response(user_input):
     response = ""
-    for chunk in conversation_chain.stream(
-        {"question": user_input},
-        config={"configurable": {"session_id": SESSION_ID}}
-    ):
-        response += chunk
-    return response
+    try:
+        if chat_history:
+            # Use the conversation chain with history
+            for chunk in conversation_chain.stream(
+                {"question": user_input},
+                config={"configurable": {"session_id": SESSION_ID}}
+            ):
+                response += chunk
+        else:
+            # Use the standard chain without history
+            for chunk in standard_chain.stream({"question": user_input}):
+                response += chunk
+        
+        # Add to session state history (backup)
+        st.session_state.chat_history_messages.append({"role": "assistant", "content": response})
+        
+        return response
+    except Exception as e:
+        error_msg = f"Error generating response: {str(e)}"
+        st.error(error_msg)
+        return f"I apologize, but I encountered an error. Please try again or check your API key configuration. Error: {str(e)}"
 
 # Callback function for the form submission
 def handle_input_submit():
@@ -178,7 +258,7 @@ with st.sidebar:
     st.subheader("Upload Files")
     uploaded_files = st.file_uploader("Upload data science related files", 
                                     accept_multiple_files=True, 
-                                    type=["pdf", "csv", "txt", "py", "ipynb", ".r", "sql"])
+                                    type=["pdf", "csv", "txt", "py", "ipynb", "r", "sql"])
     
     if uploaded_files and uploaded_files != st.session_state.uploaded_files:
         st.session_state.uploaded_files = uploaded_files
@@ -210,11 +290,13 @@ if st.session_state.needs_rerun:
 # Display chat history in reverse order
 st.divider()
 st.subheader("Chat History")
-for msg in reversed(chat_history.messages):  # Reverse the order to show the latest messages first
-    if isinstance(msg, HumanMessage):
-        st.write(f"**You:** {msg.content}")
-    if isinstance(msg, AIMessage):
-        st.write(f"**Tutor:** {msg.content}")
+
+# Use session state as the source of truth for displaying history
+for msg in reversed(st.session_state.chat_history_messages):
+    if msg["role"] == "user":
+        st.write(f"**You:** {msg['content']}")
+    else:
+        st.write(f"**Tutor:** {msg['content']}")
 
 # Display file analysis if files are uploaded
 if st.session_state.documents:
@@ -230,4 +312,4 @@ if st.session_state.documents:
             st.write(doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content)
             if i == 2 and len(st.session_state.documents) > 3:
                 st.write(f"...and {len(st.session_state.documents) - 3} more documents")
-                break   
+                break
