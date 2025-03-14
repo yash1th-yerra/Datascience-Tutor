@@ -44,7 +44,7 @@ SESSION_ID = "user_123"
 # Initialize chat history
 chat_history = SQLChatMessageHistory(
     session_id=SESSION_ID,
-    connection_string=f"sqlite:///{DB_PATH}"
+    connection=f"sqlite:///{DB_PATH}"
 )
 
 # Initialize the LLM
