@@ -1,315 +1,284 @@
 import streamlit as st
+import sqlite3
 import os
-import tempfile
-import pandas as pd
-import numpy as np
-# import matplotlib.pyplot as plt
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+import chromadb
+import warnings
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import SQLChatMessageHistory
-from langchain_community.document_loaders import PyPDFLoader, CSVLoader, TextLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# Fix for deprecation warnings
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import ConversationalRetrievalChain
+from langchain.chains.question_answering import load_qa_chain
+from langchain.chains.llm import LLMChain
+from dotenv import load_dotenv
 
-# Load environment variables - works for local development
+# Filter deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+# Silence TensorFlow logs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Prevent runtime errors with event loops
+os.environ['PYTHONUNBUFFERED'] = '1'
+
+# Load environment variables
 load_dotenv()
 
-# For Streamlit Cloud deployment, get API key from secrets
-# Use a try-except to handle both local and cloud environments
-try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Ensure API key is available
-if not GEMINI_API_KEY:
-    st.error("GEMINI_API_KEY is not set. Please set it in your .env file or Streamlit secrets.")
-    st.stop()
-
-# Streamlit configuration
-st.set_page_config(page_title="Data Science Tutor", layout="wide")
-st.title("Data Science Tutor")
-
-# Initialize session state variables
-if 'uploaded_files' not in st.session_state:
-    st.session_state.uploaded_files = []
-if 'documents' not in st.session_state:
-    st.session_state.documents = []
-if 'vectorstore' not in st.session_state:
-    st.session_state.vectorstore = None
-if 'submitted_input' not in st.session_state:
-    st.session_state.submitted_input = ""
-if 'needs_rerun' not in st.session_state:
-    st.session_state.needs_rerun = False
-if 'chat_history_messages' not in st.session_state:
-    st.session_state.chat_history_messages = []
-
-# Generate a unique session ID for each user
-if 'session_id' not in st.session_state:
-    st.session_state.session_id = f"user_{np.random.randint(10000)}"
-
-# Use a database path that works in Streamlit Cloud
-# For Streamlit Cloud, we'll use in-memory SQLite database
-DB_PATH = ":memory:"  # Use in-memory SQLite database for Streamlit Cloud
-SESSION_ID = st.session_state.session_id
-
-# Initialize chat history
-try:
-    chat_history = SQLChatMessageHistory(
-        session_id=SESSION_ID,
-        connection=f"sqlite:///{DB_PATH}"
-    )
-except Exception as e:
-    st.error(f"Failed to initialize chat history: {str(e)}")
-    st.error("Falling back to session-based history")
-    chat_history = None
-
-# Initialize the LLM with error handling
-try:
-    llm = ChatGoogleGenerativeAI(
-        api_key=GEMINI_API_KEY,
-        model="gemini-1.5-flash",  # Updated model name
-        streaming=True
-    )
-except Exception as e:
-    st.error(f"Failed to initialize LLM: {str(e)}")
-    st.write("Please check your GEMINI_API_KEY and model name.")
-    st.stop()
-
-# Create embeddings with error handling
-try:
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="embedding-001",  # Updated model name
-        api_key=GEMINI_API_KEY
-    )
-except Exception as e:
-    st.error(f"Failed to initialize embeddings: {str(e)}")
-    embeddings = None
-
-# Function to process uploaded files
-def process_uploaded_files(uploaded_files):
-    documents = []
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    
-    for file in uploaded_files:
-        file_ext = os.path.splitext(file.name)[1].lower()
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-                temp_file.write(file.getvalue())
-                temp_path = temp_file.name
-            
-            try:
-                if file_ext == '.pdf':
-                    loader = PyPDFLoader(temp_path)
-                    documents.extend(loader.load())
-                elif file_ext == '.csv':
-                    loader = CSVLoader(temp_path)
-                    documents.extend(loader.load())
-                elif file_ext in ['.txt', '.py', '.ipynb', '.r', '.sql']:
-                    loader = TextLoader(temp_path)
-                    documents.extend(loader.load())
-                else:
-                    st.warning(f"Unsupported file type: {file_ext}")
-            except Exception as e:
-                st.error(f"Error processing file {file.name}: {str(e)}")
-            finally:
-                # Clean up temp file with error handling
-                try:
-                    os.unlink(temp_path)
-                except Exception as e:
-                    st.warning(f"Could not delete temporary file: {str(e)}")
-        except Exception as e:
-            st.error(f"Error creating temporary file for {file.name}: {str(e)}")
-    
-    if documents and embeddings:
-        # Add a try-except block to catch embedding errors
-        try:
-            split_docs = text_splitter.split_documents(documents)
-            vectorstore = FAISS.from_documents(split_docs, embeddings)
-            st.session_state.vectorstore = vectorstore
-            st.session_state.documents = documents
-            st.success(f"Successfully processed {len(uploaded_files)} files with {len(split_docs)} text chunks.")
-        except Exception as e:
-            st.error(f"Error during document processing: {str(e)}")
-            # Continue without vector search if embedding fails
-            st.session_state.documents = documents
-            st.warning("File content is available but advanced search capabilities are limited.")
-    return documents
-
-# Create the chat template
-standard_template = ChatPromptTemplate(
-    messages=[
-        ("system", "You are a highly knowledgeable Data Science tutor. You must strictly answer only Data Science-related queries. If a user asks about anything unrelated, firmly respond with: 'I can only assist with Data Science topics. Please ask a question related to Data Science. Other topics will not be addressed.provide answers in clear and detailed way'"),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{question}")
-    ]
+# Initialize LLM
+llm = ChatGroq(
+    groq_api_key=os.getenv("GROQ_API_KEY"),
+    model_name="Gemma2-9b-It"
 )
 
-# Create the output parser
-output_parser = StrOutputParser()
+# Hugging Face Embeddings with updated import
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Define the conversation chain
-standard_chain = standard_template | llm | output_parser
+# Database Setup
+def init_db():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT)''')
+    conn.commit()
+    conn.close()
 
-# Wrap the chain with message history
-# Use a fallback mechanism if SQLChatMessageHistory fails
-if chat_history:
-    conversation_chain = RunnableWithMessageHistory(
-        standard_chain,
-        lambda session_id: chat_history,
-        input_messages_key="question",
-        history_messages_key="chat_history"
-    )
-else:
-    # Create a simple chain without persistent history
-    conversation_chain = standard_chain
+def authenticate(username, password):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE username=? AND password=?", (username, password))
+    user = c.fetchone()
+    conn.close()
+    return user
 
-def generate_response(user_input):
-    # Add to session state history (backup)
-    st.session_state.chat_history_messages.append({"role": "user", "content": user_input})
+def register(username, password):
+    if not username or not password:
+        return False
     
-    if st.session_state.vectorstore and embeddings:
-        try:
-            # Create a retrieval chain that uses the vectorstore
-            retrieval_chain = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                retriever=st.session_state.vectorstore.as_retriever(),
-                return_source_documents=True
-            )
-            
-            # Prepare conversation history for the chain
-            if chat_history and chat_history.messages:
-                history = [(msg.content, chat_history.messages[i+1].content) 
-                          for i, msg in enumerate(chat_history.messages[:-1:2]) 
-                          if i+1 < len(chat_history.messages)]
-            else:
-                # Use session state as backup
-                history = []
-                for i in range(0, len(st.session_state.chat_history_messages)-1, 2):
-                    if i+1 < len(st.session_state.chat_history_messages):
-                        history.append((
-                            st.session_state.chat_history_messages[i]["content"],
-                            st.session_state.chat_history_messages[i+1]["content"]
-                        ))
-            
-            result = retrieval_chain.invoke({
-                "question": user_input,
-                "chat_history": history
-            })
-            response = result["answer"]
-            
-            # Add to both history systems
-            if chat_history:
-                chat_history.add_user_message(user_input)
-                chat_history.add_ai_message(response)
-            st.session_state.chat_history_messages.append({"role": "assistant", "content": response})
-            
-            return response
-        except Exception as e:
-            # Fallback to standard chain if retrieval fails
-            st.warning(f"Advanced search failed, using standard response: {str(e)}")
-            return generate_standard_response(user_input)
-    else:
-        # Use the standard chain if no documents are uploaded
-        return generate_standard_response(user_input)
-
-def generate_standard_response(user_input):
-    response = ""
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
     try:
-        if chat_history:
-            # Use the conversation chain with history
-            for chunk in conversation_chain.stream(
-                {"question": user_input},
-                config={"configurable": {"session_id": SESSION_ID}}
-            ):
-                response += chunk
-        else:
-            # Use the standard chain without history
-            for chunk in standard_chain.stream({"question": user_input}):
-                response += chunk
-        
-        # Add to session state history (backup)
-        st.session_state.chat_history_messages.append({"role": "assistant", "content": response})
-        
-        return response
+        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+# ChromaDB Initialization
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+
+def load_vectorstore():
+    try:
+        if os.path.exists("./chroma_db"):
+            # Updated Chroma import usage
+            return Chroma(client=chroma_client, embedding_function=embedding_model)
+        return None
     except Exception as e:
-        error_msg = f"Error generating response: {str(e)}"
-        st.error(error_msg)
-        return f"I apologize, but I encountered an error. Please try again or check your API key configuration. Error: {str(e)}"
+        st.error(f"Error loading vector store: {str(e)}")
+        return None
 
-# Callback function for the form submission
-def handle_input_submit():
-    user_input = st.session_state.user_input
-    if user_input:
-        st.session_state.submitted_input = user_input
-        st.session_state.needs_rerun = True
+def save_vectorstore(docs):
+    try:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+        split_docs = text_splitter.split_documents(docs)
+        # Updated Chroma import usage
+        return Chroma.from_documents(split_docs, embedding_model, client=chroma_client)
+    except Exception as e:
+        st.error(f"Error saving to vector store: {str(e)}")
+        return None
 
-# Sidebar for file upload
-with st.sidebar:
-    st.header("Tools")
+def get_session_history(session_id: str):
+    return SQLChatMessageHistory(
+        connection_string="sqlite:///chat_history.db",
+        session_id=session_id
+    )
+
+def process_document(uploaded_file):
+    try:
+        # Create temp directory if it doesn't exist
+        os.makedirs("temp_files", exist_ok=True)
+        
+        temp_file_path = os.path.join("temp_files", uploaded_file.name)
+        with open(temp_file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        loader = PyPDFLoader(temp_file_path)
+        docs = loader.load()
+        
+        # Cleanup
+        os.remove(temp_file_path)
+        
+        return save_vectorstore(docs)
+    except Exception as e:
+        st.error(f"Error processing document: {str(e)}")
+        return None
+
+# Function to handle form submission
+def handle_form_submit():
+    if st.session_state.user_question:  # Check if there's input
+        st.session_state.submit_question = True
+        # Store the current question and clear the input
+        st.session_state.current_question = st.session_state.user_question
+        st.session_state.user_question = ""  # Clear the input field
+
+# Streamlit UI setup with error handling
+try:
+    st.title("Data Science Tutor 🤖")
+    init_db()
     
-    # File upload section
-    st.subheader("Upload Files")
-    uploaded_files = st.file_uploader("Upload data science related files", 
-                                    accept_multiple_files=True, 
-                                    type=["pdf", "csv", "txt", "py", "ipynb", "r", "sql"])
+    # Initialize session state variables
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = None
     
-    if uploaded_files and uploaded_files != st.session_state.uploaded_files:
-        st.session_state.uploaded_files = uploaded_files
-        process_uploaded_files(uploaded_files)
+    if "vectorstore" not in st.session_state:
+        st.session_state.vectorstore = load_vectorstore()
+        
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
     
-    # Display uploaded files
-    if st.session_state.uploaded_files:
-        st.subheader("Uploaded Files")
-        for file in st.session_state.uploaded_files:
-            st.write(f"- {file.name}")
+    # For handling form submission
+    if "submit_question" not in st.session_state:
+        st.session_state.submit_question = False
+    
+    # For storing current question
+    if "current_question" not in st.session_state:
+        st.session_state.current_question = None
+    
+except Exception as setup_error:
+    st.error(f"Application setup error: {str(setup_error)}")
 
-# Main chat interface
-st.subheader("Chat with the Data Science Tutor")
-
-# Use a form to handle the input submission properly
-with st.form(key="input_form", clear_on_submit=True):
-    user_input = st.text_input("Ask me anything related to Data Science...", key="user_input")
-    submit_button = st.form_submit_button("Submit", on_click=handle_input_submit)
-
-# Process the submitted input
-if st.session_state.needs_rerun:
-    response_container = st.empty()
-    with st.spinner("Generating..."):
-        response = generate_response(st.session_state.submitted_input)
-        response_container.markdown(response)
-    st.session_state.needs_rerun = False
-    st.session_state.submitted_input = ""
-
-# Display chat history in reverse order
-st.divider()
-st.subheader("Chat History")
-
-# Use session state as the source of truth for displaying history
-for msg in reversed(st.session_state.chat_history_messages):
-    if msg["role"] == "user":
-        st.write(f"**You:** {msg['content']}")
+# Main application logic with try-except blocks
+try:
+    # Login/Register Screen
+    if st.session_state.user_id is None:
+        st.subheader("Login / Register")
+        tab1, tab2 = st.tabs(["Login", "Register"])
+        
+        with tab1:
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Login"):
+                user = authenticate(username, password)
+                if user:
+                    st.session_state.user_id = user[0]
+                    st.success("Login successful!")
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
+        
+        with tab2:
+            new_username = st.text_input("New Username", key="register_username")
+            new_password = st.text_input("New Password", type="password", key="register_password")
+            if st.button("Register"):
+                if not new_username or not new_password:
+                    st.error("Username and password cannot be empty")
+                elif register(new_username, new_password):
+                    st.success("Registration successful! Please login.")
+                else:
+                    st.error("Username already exists")
+    # Main Application Screen
     else:
-        st.write(f"**Tutor:** {msg['content']}")
+        with st.sidebar:
+            st.header("Upload Documents")
+            uploaded_file = st.file_uploader("Upload a PDF for RAG-based QA", type=["pdf"])
+            if uploaded_file is not None:
+                if st.button("Process Document"):
+                    with st.spinner("Processing document..."):
+                        vectorstore = process_document(uploaded_file)
+                        if vectorstore is not None:
+                            st.session_state.vectorstore = vectorstore
+                            st.success("Document processed successfully!")
+            
+            # Add logout button to sidebar
+            if st.button("Logout"):
+                st.session_state.clear()
+                st.rerun()
+        
+        st.subheader("Chat with the Tutor")
+        
+        # User input for new questions - BEFORE displaying chat history
+        with st.form(key="question_form"):
+            user_input = st.text_input("Ask a question:", key="user_question")
+            submit_button = st.form_submit_button("Submit", on_click=handle_form_submit)
+        
+        # Process the question if submitted
+        if st.session_state.submit_question and st.session_state.current_question:
+            user_input = st.session_state.current_question
+            try:
+                if st.session_state.vectorstore:
+                    retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 3})
+                    
+                    # Create the system message prompt
+                    system_prompt = """
+                    You are a highly knowledgeable AI tutor specializing in Data Science.
+                    You must only answer questions related to Data Science, Machine Learning,
+                    Deep Learning, Statistics, Data Analytics, and related topics.
+                    If a user asks about something unrelated, politely refuse to answer.
+                    
+                    Use the following pieces of retrieved context to answer the question.
+                    If you don't know the answer, just say that you don't know.
+                    
+                    Context: {context}
+                    
+                    Question: {question}
+                    """
+                    
+                    # Create the QA prompt
+                    qa_prompt = ChatPromptTemplate.from_template(system_prompt)
+                    
+                    # Create the conversation chain
+                    chain = ConversationalRetrievalChain.from_llm(
+                        llm=llm,
+                        retriever=retriever,
+                        return_source_documents=False,
+                        combine_docs_chain_kwargs={"prompt": qa_prompt},
+                        chain_type="stuff",
+                        get_chat_history=lambda h: h,
+                        verbose=False,  # Reduce debug output
+                    )
+                    
+                    with st.spinner("Thinking..."):
+                        # Format chat history for the chain
+                        formatted_history = []
+                        for q, a in st.session_state.chat_history:
+                            formatted_history.append(HumanMessage(content=q))
+                            formatted_history.append(AIMessage(content=a))
+                        
+                        # Process the response
+                        try:
+                            response = chain({"question": user_input, "chat_history": formatted_history})
+                            response_text = response.get("answer", "I'm sorry, I couldn't generate a response.")
+                            
+                            # Add to chat history
+                            st.session_state.chat_history.append((user_input, response_text))
+                        except Exception as chain_error:
+                            st.error(f"Error in response generation: {str(chain_error)}")
+                else:
+                    st.warning("Please upload a document first for the tutor to use as reference.")
+            except Exception as process_error:
+                st.error(f"Error processing question: {str(process_error)}")
+            
+            # Reset the submit flag without refreshing
+            st.session_state.submit_question = False
+            # Remove the current question from session state
+            st.session_state.current_question = None
+        
+        # Chat history display - AFTER the input form and processing
+        if st.session_state.chat_history:
+            st.subheader("Conversation History")
+            for q, a in st.session_state.chat_history:
+                with st.container():
+                    st.markdown(f"**You**: {q}")
+                    st.markdown(f"**Tutor**: {a}")
+                    st.markdown("---")
 
-# Display file analysis if files are uploaded
-if st.session_state.documents:
-    st.divider()
-    st.subheader("File Analysis")
-    st.write(f"Number of documents processed: {len(st.session_state.documents)}")
-    st.write("You can ask questions about the content of your uploaded files.")
-    
-    # Preview first few documents
-    if st.checkbox("Show document preview"):
-        for i, doc in enumerate(st.session_state.documents[:3]):
-            st.write(f"**Document {i+1}** (Preview):")
-            st.write(doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content)
-            if i == 2 and len(st.session_state.documents) > 3:
-                st.write(f"...and {len(st.session_state.documents) - 3} more documents")
-                break
+except Exception as app_error:
+    st.error(f"Application error: {str(app_error)}")
+    st.info("Please refresh the page and try again.")
