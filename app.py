@@ -1,7 +1,7 @@
 import streamlit as st
 import sqlite3
 import os
-# import chromadb
+import chromadb
 import warnings
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage
@@ -72,7 +72,7 @@ def register(username, password):
         conn.close()
 
 # ChromaDB Initialization
-# chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
 def load_vectorstore():
     try:
@@ -89,12 +89,7 @@ def save_vectorstore(docs):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         split_docs = text_splitter.split_documents(docs)
         # Updated Chroma import usage
-        vectorstore = Chroma.from_documents(
-            documents=docs,
-            embedding=embedding_model,
-            persist_directory="./chroma_db"  # Specify a directory
-        ) 
-        return vectorstore
+        return Chroma.from_documents(split_docs, embedding_model, client=chroma_client)
     except Exception as e:
         st.error(f"Error saving to vector store: {str(e)}")
         return None

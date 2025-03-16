@@ -20,3 +20,4 @@ sqlalchemy
 langchain-groq
 langchain-chroma
 langchain-huggingface
+chromadb
