@@ -1,3 +1,7 @@
+import sys
+import pysqlite3
+sys.modules["sqlite3"] = pysqlite3
+
 import streamlit as st
 import sqlite3
 import os
@@ -11,20 +15,12 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-# Fix for deprecation warnings
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import ConversationalRetrievalChain
 from langchain.chains.question_answering import load_qa_chain
 from langchain.chains.llm import LLMChain
 from dotenv import load_dotenv
-# Instead of import sqlite3, use:
-import pysqlite3
-
-# Force ChromaDB to use pysqlite3 as SQLite
-import sys
-sys.modules["sqlite3"] = pysqlite3
-
 
 # Filter deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
