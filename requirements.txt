@@ -1,18 +1,12 @@
-# Core dependencies
 streamlit
-python-dotenv
-# LangChain and related components
-langchain
-langchain-google-genai
-langchain-community
+sqlite3
+chromadb
+langchain-groq
 langchain-core
-# Vector database and embeddings
-faiss-cpu
+langchain
+langchain-community
+langchain-chroma
+langchain-huggingface
+python-dotenv
+PyPDF2
 sentence-transformers
-# Document processing
-pypdf
-
-# Data processing
-numpy
-# Database
-sqlalchemy
