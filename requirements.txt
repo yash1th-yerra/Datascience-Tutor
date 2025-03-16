@@ -16,7 +16,7 @@ pypdf
 numpy
 # Database
 sqlalchemy
-sqlite3
+# sqlite3
 langchain-groq
 langchain-chroma
 langchain-huggingface
