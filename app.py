@@ -18,6 +18,13 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.chains.question_answering import load_qa_chain
 from langchain.chains.llm import LLMChain
 from dotenv import load_dotenv
+# Instead of import sqlite3, use:
+import pysqlite3
+
+# Force ChromaDB to use pysqlite3 as SQLite
+import sys
+sys.modules["sqlite3"] = pysqlite3
+
 
 # Filter deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
