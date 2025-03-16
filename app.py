@@ -125,7 +125,8 @@ def process_document(uploaded_file):
 
 # Function to handle form submission
 def handle_form_submit():
-    if st.session_state.user_question:  # Check if there's input
+    # Check if the key exists and has a value
+    if "user_question" in st.session_state and st.session_state.user_question:
         st.session_state.submit_question = True
         # Store the current question and clear the input
         st.session_state.current_question = st.session_state.user_question
@@ -153,6 +154,10 @@ try:
     # For storing current question
     if "current_question" not in st.session_state:
         st.session_state.current_question = None
+    
+    # Initialize user_question
+    if "user_question" not in st.session_state:
+        st.session_state.user_question = ""
     
 except Exception as setup_error:
     st.error(f"Application setup error: {str(setup_error)}")
