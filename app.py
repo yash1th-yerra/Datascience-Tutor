@@ -37,7 +37,8 @@ load_dotenv()
 # Initialize LLM
 llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY"),
-    model_name="Gemma2-9b-It"
+    model_name="Gemma2-9b-It",
+    max_tokens=1000
 )
 
 # Hugging Face Embeddings with updated import
@@ -225,18 +226,22 @@ try:
                     
                     # Create the system message prompt
                     system_prompt = """
-                    You are a highly knowledgeable AI tutor specializing in Data Science.
-                    You must only answer questions related to Data Science, Machine Learning,
-                    Deep Learning, Statistics, Data Analytics, and related topics.
-                    If a user asks about something unrelated, politely refuse to answer.
-                    
-                    Use the following pieces of retrieved context to answer the question.
-                    If you don't know the answer, just say that you don't know.
-                    
-                    Context: {context}
-                    
-                    Question: {question}
-                    """
+You are a highly knowledgeable AI tutor specializing in Data Science.
+You must only answer questions related to Data Science, Machine Learning,
+Deep Learning, Statistics, Data Analytics, and related topics.
+If a user asks about something unrelated, politely refuse to answer.
+
+Use the following pieces of retrieved context to answer the question.
+If you don't know the answer, just say that you don't know.
+
+**Always provide detailed, step-by-step explanations.**
+**Use examples, analogies, and bullet points where appropriate.**
+**Ensure your responses are at least 10-15 lines long.**
+
+Context: {context}
+
+Question: {question}
+"""
                     
                     # Create the QA prompt
                     qa_prompt = ChatPromptTemplate.from_template(system_prompt)
@@ -279,13 +284,15 @@ try:
             st.session_state.current_question = None
         
         # Chat history display - AFTER the input form and processing
-        if st.session_state.chat_history:
-            st.subheader("Conversation History")
-            for q, a in st.session_state.chat_history:
-                with st.container():
-                    st.markdown(f"**You**: {q}")
-                    st.markdown(f"**Tutor**: {a}")
-                    st.markdown("---")
+        # Chat history display - AFTER the input form and processing
+    if st.session_state.chat_history:
+        st.subheader("Conversation History")
+        # Reverse the chat history to show latest messages first
+        for q, a in reversed(st.session_state.chat_history):
+            with st.container():
+                st.markdown(f"**You**: {q}")
+                st.markdown(f"**Tutor**: {a}")
+                st.markdown("---")
 
 except Exception as app_error:
     st.error(f"Application error: {str(app_error)}")
