@@ -1,6 +1,6 @@
 streamlit
 sqlite3
-chromadb
+# chromadb
 langchain-groq
 langchain-core
 langchain

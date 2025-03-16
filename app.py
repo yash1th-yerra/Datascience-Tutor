@@ -1,7 +1,7 @@
 import streamlit as st
 import sqlite3
 import os
-import chromadb
+# import chromadb
 import warnings
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage
